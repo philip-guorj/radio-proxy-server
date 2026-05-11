@@ -43,15 +43,30 @@ app.get('/proxy/audio', async (req, res) => {
       'Cache-Control': 'no-cache'
     });
 
-    // 管道传输音频流
-    response.body.pipe(res);
+    // 正确传输流（Node.js 18+ 兼容）
+    const reader = response.body.getReader();
+    const pump = () => reader.read()
+      .then(({ done, value }) => {
+        if (done) {
+          res.end();
+          return;
+        }
+        res.write(value);
+        return pump();
+      });
+    pump().catch(err => {
+      console.error('Stream error:', err);
+      res.end();
+    });
 
   } catch (error) {
     console.error(`Proxy error: ${error.message}`);
-    res.status(502).json({
-      error: 'Proxy request failed',
-      message: error.message
-    });
+    if (!res.headersSent) {
+      res.status(502).json({
+        error: 'Proxy request failed',
+        message: error.message
+      });
+    }
   }
 });
 
