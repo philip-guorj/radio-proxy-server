@@ -14,10 +14,24 @@ app.get('/health', (req, res) => {
 
 // 音频代理端点
 app.get('/proxy/audio', async (req, res) => {
-  const targetUrl = req.query.url;
+  // 先解码URL（客户端用encodeURIComponent编码过）
+  let targetUrl;
+  try {
+    targetUrl = decodeURIComponent(req.query.url || '');
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid url parameter (decode failed)' });
+  }
 
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing url parameter' });
+  }
+
+  // 验证URL格式
+  let urlObj;
+  try {
+    urlObj = new URL(targetUrl);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid URL format: ' + targetUrl });
   }
 
   try {
@@ -26,7 +40,7 @@ app.get('/proxy/audio', async (req, res) => {
     const response = await fetch(targetUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; RadioProxy/1.0)',
-        'Referer': new URL(targetUrl).origin
+        'Referer': urlObj.origin
       },
       signal: AbortSignal.timeout(10000) // 10秒超时
     });
