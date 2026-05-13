@@ -39,10 +39,13 @@ app.get('/proxy/audio', async (req, res) => {
 
     const response = await fetch(targetUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; RadioProxy/1.0)',
-        'Referer': urlObj.origin
-      },
-      signal: AbortSignal.timeout(10000) // 10秒超时
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': urlObj.origin,
+        'Accept': '*/*',
+        'Accept-Encoding': 'identity',
+        'Connection': 'keep-alive'
+      }
+      // 注意：音频流不能设置超时，因为流是持续的
     });
 
     if (!response.ok) {
