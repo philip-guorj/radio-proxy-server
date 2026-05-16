@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const http = require('http');
+const https = require('https');
 
 const app = express();
 
@@ -12,11 +13,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 音频代理端点
-app.get('/proxy/audio', async (req, res) => {
-  // 先解码URL（客户端用encodeURIComponent编码过）
+// 音频代理端点（使用http/https模块，更可靠）
+app.get('/proxy/audio', (req, res) => {
+  // 先解码URL（兼容 Java URLEncoder 和 JS encodeURIComponent）
   let targetUrl;
- try {
+  try {
     // Java URLEncoder 把空格编码成 '+'，需要先替换成 '%20' 才能让 decodeURIComponent 正确解码
     const encodedUrl = (req.query.url || '').replace(/\+/g, '%20');
     targetUrl = decodeURIComponent(encodedUrl);
@@ -36,57 +37,44 @@ app.get('/proxy/audio', async (req, res) => {
     return res.status(400).json({ error: 'Invalid URL format: ' + targetUrl });
   }
 
-  try {
-    console.log(`Proxying: ${targetUrl}`);
+  console.log(`Proxying: ${targetUrl}`);
 
-    const response = await fetch(targetUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Referer': urlObj.origin,
-        'Accept': '*/*',
-        'Accept-Encoding': 'identity',
-        'Connection': 'keep-alive'
-      }
-      // 注意：音频流不能设置超时，因为流是持续的
-    });
+  const protocol = urlObj.protocol === 'https:' ? https : http;
 
-    if (!response.ok) {
-      throw new Error(`Target responded with ${response.status}`);
+  const options = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Referer': urlObj.origin,
+      'Accept': '*/*',
+      'Connection': 'keep-alive'
     }
+  };
 
-    // 设置响应头
+  const proxyReq = protocol.get(targetUrl, options, (proxyRes) => {
+    console.log(`Target responded: ${proxyRes.statusCode}`);
+
+    // 转发响应头
     res.set({
-      'Content-Type': response.headers.get('Content-Type') || 'audio/mpeg',
-      'Content-Length': response.headers.get('Content-Length'),
+      'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache'
     });
 
-    // 正确传输流（Node.js 18+ 兼容）
-    const reader = response.body.getReader();
-    const pump = () => reader.read()
-      .then(({ done, value }) => {
-        if (done) {
-          res.end();
-          return;
-        }
-        res.write(value);
-        return pump();
-      });
-    pump().catch(err => {
-      console.error('Stream error:', err);
-      res.end();
-    });
+    // 管道传输数据（最稳定）
+    proxyRes.pipe(res);
+  });
 
-  } catch (error) {
-    console.error(`Proxy error: ${error.message}`);
+  proxyReq.on('error', (err) => {
+    console.error('Proxy request error:', err.message);
     if (!res.headersSent) {
-      res.status(502).json({
-        error: 'Proxy request failed',
-        message: error.message
-      });
+      res.status(502).json({ error: 'Proxy request failed', message: err.message });
     }
-  }
+  });
+
+  // 处理客户端断开连接
+  res.on('close', () => {
+    proxyReq.destroy();
+  });
 });
 
 // 根路径
