@@ -16,10 +16,12 @@ app.get('/health', (req, res) => {
 app.get('/proxy/audio', async (req, res) => {
   // 先解码URL（客户端用encodeURIComponent编码过）
   let targetUrl;
-  try {
-    targetUrl = decodeURIComponent(req.query.url || '');
+ try {
+    // Java URLEncoder 把空格编码成 '+'，需要先替换成 '%20' 才能让 decodeURIComponent 正确解码
+    const encodedUrl = (req.query.url || '').replace(/\+/g, '%20');
+    targetUrl = decodeURIComponent(encodedUrl);
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid url parameter (decode failed)' });
+    return res.status(400).json({ error: 'Invalid url parameter (decode failed)', detail: e.message });
   }
 
   if (!targetUrl) {
