@@ -4,37 +4,30 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
-
-// 启用 CORS
 app.use(cors());
 
-// 健康检查端点
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 音频代理端点（使用http/https模块，更可靠）
 app.get('/proxy/audio', (req, res) => {
-  // 先解码URL（兼容 Java URLEncoder 和 JS encodeURIComponent）
   let targetUrl;
   try {
-    // Java URLEncoder 把空格编码成 '+'，需要先替换成 '%20' 才能让 decodeURIComponent 正确解码
     const encodedUrl = (req.query.url || '').replace(/\+/g, '%20');
     targetUrl = decodeURIComponent(encodedUrl);
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid url parameter (decode failed)', detail: e.message });
+    return res.status(400).json({ error: 'Invalid url parameter', detail: e.message });
   }
 
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing url parameter' });
   }
 
-  // 验证URL格式
   let urlObj;
   try {
     urlObj = new URL(targetUrl);
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid URL format: ' + targetUrl });
+    return res.status(400).json({ error: 'Invalid URL format', detail: e.message });
   }
 
   console.log(`Proxying: ${targetUrl}`);
@@ -42,6 +35,10 @@ app.get('/proxy/audio', (req, res) => {
   const protocol = urlObj.protocol === 'https:' ? https : http;
 
   const options = {
+    hostname: urlObj.hostname,
+    port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+    path: urlObj.pathname + urlObj.search,
+    method: 'GET',
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Referer': urlObj.origin,
@@ -50,48 +47,90 @@ app.get('/proxy/audio', (req, res) => {
     }
   };
 
-  const proxyReq = protocol.get(targetUrl, options, (proxyRes) => {
+  const proxyReq = protocol.request(options, (proxyRes) => {
     console.log(`Target responded: ${proxyRes.statusCode}`);
 
-    // 转发响应头
+    // 处理重定向
+    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
+      const location = proxyRes.headers.location;
+      if (location) {
+        console.log(`Redirecting to: ${location}`);
+        targetUrl = location;
+        const newUrlObj = new URL(targetUrl);
+        const newProtocol = newUrlObj.protocol === 'https:' ? https : http;
+        const newOptions = {
+          hostname: newUrlObj.hostname,
+          port: newUrlObj.port || (newUrlObj.protocol === 'https:' ? 443 : 80),
+          path: newUrlObj.pathname + newUrlObj.search,
+          method: 'GET',
+          headers: options.headers
+        };
+        const redirectReq = newProtocol.request(newOptions, (redirectRes) => {
+          console.log(`Redirect target responded: ${redirectRes.statusCode}`);
+          if (redirectRes.statusCode !== 200) {
+            if (!res.headersSent) {
+              res.status(502).json({ error: 'Redirect target error', status: redirectRes.statusCode });
+            }
+            return;
+          }
+          res.set({
+            'Content-Type': redirectRes.headers['content-type'] || 'audio/mpeg',
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'no-cache'
+          });
+          redirectRes.pipe(res);
+        });
+        redirectReq.on('error', (err) => {
+          if (!res.headersSent) {
+            res.status(502).json({ error: 'Redirect failed', message: err.message });
+          }
+        });
+        redirectReq.end();
+        return;
+      }
+    }
+
+    if (proxyRes.statusCode !== 200) {
+      let body = '';
+      proxyRes.on('data', (c) => { body += c; });
+      proxyRes.on('end', () => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Target error', status: proxyRes.statusCode, message: body.substring(0, 200) });
+        }
+      });
+      return;
+    }
+
     res.set({
       'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache'
     });
 
-    // 管道传输数据（最稳定）
     proxyRes.pipe(res);
   });
 
   proxyReq.on('error', (err) => {
-    console.error('Proxy request error:', err.message);
+    console.error('Proxy error:', err.message);
     if (!res.headersSent) {
       res.status(502).json({ error: 'Proxy request failed', message: err.message });
     }
   });
 
-  // 处理客户端断开连接
-  res.on('close', () => {
-    proxyReq.destroy();
-  });
+  res.on('close', () => { proxyReq.destroy(); });
+
+  proxyReq.end();
 });
 
-// 根路径
 app.get('/', (req, res) => {
   res.json({
     service: 'Radio Proxy Server',
     status: 'running',
-    endpoints: {
-      health: '/health',
-      proxy: '/proxy/audio?url=ENCODED_URL'
-    }
+    endpoints: { health: '/health', proxy: '/proxy/audio?url=ENCODED_URL' }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Radio Proxy Server running on port ${PORT}`);
-  console.log(`   Health: http://localhost:${PORT}/health`);
-  console.log(`   Proxy: http://localhost:${PORT}/proxy/audio?url=...`);
+  console.log(`Radio Proxy Server running on port ${PORT}`);
 });
