@@ -16,7 +16,7 @@ app.get('/proxy/audio', (req, res) => {
     const encodedUrl = (req.query.url || '').replace(/\+/g, '%20');
     targetUrl = decodeURIComponent(encodedUrl);
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid url parameter', detail: e.message });
+    return res.status(400).json({ error: 'Invalid url parameter' });
   }
 
   if (!targetUrl) {
@@ -27,110 +27,90 @@ app.get('/proxy/audio', (req, res) => {
   try {
     urlObj = new URL(targetUrl);
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid URL format', detail: e.message });
+    return res.status(400).json({ error: 'Invalid URL format' });
   }
 
-  console.log(`Proxying: ${targetUrl}`);
+  console.log('Proxying:', targetUrl);
 
-  const protocol = urlObj.protocol === 'https:' ? https : http;
+  const isHttps = urlObj.protocol === 'https:';
+  const mod = isHttps ? https : http;
+  const port = urlObj.port || (isHttps ? 443 : 80);
+  const path = urlObj.pathname + urlObj.search;
 
   const options = {
     hostname: urlObj.hostname,
-    port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
-    path: urlObj.pathname + urlObj.search,
+    port: port,
+    path: path,
     method: 'GET',
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       'Referer': urlObj.origin,
-      'Accept': '*/*',
-      'Connection': 'keep-alive'
+      'Accept': '*/*'
     }
   };
 
-  const proxyReq = protocol.request(options, (proxyRes) => {
-    console.log(`Target responded: ${proxyRes.statusCode}`);
+  const proxyReq = mod.request(options, (proxyRes) => {
+    console.log('Target status:', proxyRes.statusCode);
 
-    // 处理重定向
-    if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
+    if (proxyRes.statusCode === 200) {
+      res.set({
+        'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
+        'Accept-Ranges': 'bytes'
+      });
+      proxyRes.pipe(res);
+    } else if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
       const location = proxyRes.headers.location;
       if (location) {
-        console.log(`Redirecting to: ${location}`);
-        targetUrl = location;
-        const newUrlObj = new URL(targetUrl);
-        const newProtocol = newUrlObj.protocol === 'https:' ? https : http;
+        console.log('Redirecting to:', location);
+        // 递归处理重定向（简化版）
+        const newUrl = new URL(location, targetUrl);
+        const newIsHttps = newUrl.protocol === 'https:';
+        const newMod = newIsHttps ? https : http;
         const newOptions = {
-          hostname: newUrlObj.hostname,
-          port: newUrlObj.port || (newUrlObj.protocol === 'https:' ? 443 : 80),
-          path: newUrlObj.pathname + newUrlObj.search,
+          hostname: newUrl.hostname,
+          port: newUrl.port || (newIsHttps ? 443 : 80),
+          path: newUrl.pathname + newUrl.search,
           method: 'GET',
           headers: options.headers
         };
-        const redirectReq = newProtocol.request(newOptions, (redirectRes) => {
-          console.log(`Redirect target responded: ${redirectRes.statusCode}`);
-          if (redirectRes.statusCode !== 200) {
-            if (!res.headersSent) {
-              res.status(502).json({ error: 'Redirect target error', status: redirectRes.statusCode });
-            }
-            return;
-          }
-          res.set({
-            'Content-Type': redirectRes.headers['content-type'] || 'audio/mpeg',
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-cache'
-          });
-          redirectRes.pipe(res);
-        });
-        redirectReq.on('error', (err) => {
-          if (!res.headersSent) {
-            res.status(502).json({ error: 'Redirect failed', message: err.message });
+        const newReq = newMod.request(newOptions, (newRes) => {
+          console.log('Redirect status:', newRes.statusCode);
+          if (newRes.statusCode === 200) {
+            res.set({
+              'Content-Type': newRes.headers['content-type'] || 'audio/mpeg',
+              'Accept-Ranges': 'bytes'
+            });
+            newRes.pipe(res);
+          } else {
+            if (!res.headersSent) res.status(502).json({ error: 'Redirect target error', status: newRes.statusCode });
           }
         });
-        redirectReq.end();
+        newReq.on('error', (err) => {
+          if (!res.headersSent) res.status(502).json({ error: 'Redirect failed', message: err.message });
+        });
+        newReq.end();
         return;
       }
-    }
-
-    if (proxyRes.statusCode !== 200) {
-      let body = '';
-      proxyRes.on('data', (c) => { body += c; });
-      proxyRes.on('end', () => {
-        if (!res.headersSent) {
-          res.status(502).json({ error: 'Target error', status: proxyRes.statusCode, message: body.substring(0, 200) });
-        }
-      });
+    } else {
+      if (!res.headersSent) res.status(502).json({ error: 'Target error', status: proxyRes.statusCode });
       return;
     }
-
-    res.set({
-      'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-cache'
-    });
-
-    proxyRes.pipe(res);
   });
 
   proxyReq.on('error', (err) => {
     console.error('Proxy error:', err.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: 'Proxy request failed', message: err.message });
-    }
+    if (!res.headersSent) res.status(502).json({ error: 'Proxy request failed', message: err.message });
   });
 
-  res.on('close', () => { proxyReq.destroy(); });
-
+  res.on('close', () => proxyReq.destroy());
   proxyReq.end();
 });
 
 app.get('/', (req, res) => {
-  res.json({
-    service: 'Radio Proxy Server',
-    status: 'running',
-    endpoints: { health: '/health', proxy: '/proxy/audio?url=ENCODED_URL' }
-  });
+  res.json({ service: 'Radio Proxy Server', status: 'running' });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Radio Proxy Server running on port ${PORT}`);
+  console.log('Radio Proxy Server running on port ' + PORT);
 });
