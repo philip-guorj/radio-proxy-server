@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: 'v2.0', timestamp: new Date().toISOString() });
 });
 
 app.get('/proxy/audio', (req, res) => {
@@ -45,8 +45,10 @@ app.get('/proxy/audio', (req, res) => {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit/537.36',
       'Referer': urlObj.origin,
-      'Accept': '*/*'
-    }
+      'Accept': '*/*',
+      'Icy-MetaData': '1'
+    },
+    timeout: 10000
   };
 
   const proxyReq = mod.request(options, (proxyRes) => {
@@ -55,7 +57,8 @@ app.get('/proxy/audio', (req, res) => {
     if (proxyRes.statusCode === 200) {
       res.set({
         'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
-        'Accept-Ranges': 'bytes'
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache'
       });
       proxyRes.pipe(res);
     } else if ([301, 302, 303, 307, 308].indexOf(proxyRes.statusCode) !== -1) {
@@ -71,14 +74,16 @@ app.get('/proxy/audio', (req, res) => {
           port: newPort,
           path: newUrl.pathname + newUrl.search,
           method: 'GET',
-          headers: options.headers
+          headers: options.headers,
+          timeout: 10000
         };
         const newReq = newMod.request(newOptions, (newRes) => {
           console.log('Redirect status:', newRes.statusCode);
           if (newRes.statusCode === 200) {
             res.set({
               'Content-Type': newRes.headers['content-type'] || 'audio/mpeg',
-              'Accept-Ranges': 'bytes'
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'no-cache'
             });
             newRes.pipe(res);
           } else {
@@ -102,16 +107,21 @@ app.get('/proxy/audio', (req, res) => {
     if (!res.headersSent) res.status(502).json({ error: 'Proxy request failed', message: err.message });
   });
 
-  res.on('close', () => { proxyReq.destroy(); });
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy();
+    if (!res.headersSent) res.status(504).json({ error: 'Proxy request timeout' });
+  });
+
+  res.on('close', () => { try { proxyReq.destroy(); } catch(e) {} });
 
   proxyReq.end();
 });
 
 app.get('/', (req, res) => {
-  res.json({ service: 'Radio Proxy Server', status: 'running' });
+  res.json({ service: 'Radio Proxy Server', version: 'v2.0', status: 'running' });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('Radio Proxy Server running on port ' + PORT);
+  console.log('Radio Proxy Server v2.0 running on port ' + PORT);
 });
