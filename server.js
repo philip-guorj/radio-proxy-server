@@ -2,23 +2,22 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const https = require('https');
+const { pipeline } = require('stream');
 
 const app = express();
 app.use(cors());
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: 'v2.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: 'v2.1', timestamp: new Date().toISOString() });
 });
 
 app.get('/proxy/audio', (req, res) => {
   let targetUrl;
   try {
-    const encodedUrl = (req.query.url || '').replace(/\+/g, '%20');
-    targetUrl = decodeURIComponent(encodedUrl);
+    targetUrl = decodeURIComponent((req.query.url || '').replace(/\+/g, '%20'));
   } catch (e) {
     return res.status(400).json({ error: 'Invalid url parameter' });
   }
-
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing url parameter' });
   }
@@ -35,32 +34,38 @@ app.get('/proxy/audio', (req, res) => {
   const isHttps = urlObj.protocol === 'https:';
   const mod = isHttps ? https : http;
   const port = urlObj.port || (isHttps ? 443 : 80);
-  const path = urlObj.pathname + urlObj.search;
 
   const options = {
     hostname: urlObj.hostname,
     port: port,
-    path: path,
+    path: urlObj.pathname + urlObj.search,
     method: 'GET',
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit/537.36',
       'Referer': urlObj.origin,
-      'Accept': '*/*',
-      'Icy-MetaData': '1'
+      'Accept': '*/*'
     },
-    timeout: 10000
+    timeout: 15000
   };
 
   const proxyReq = mod.request(options, (proxyRes) => {
     console.log('Target status:', proxyRes.statusCode);
 
     if (proxyRes.statusCode === 200) {
-      res.set({
-        'Content-Type': proxyRes.headers['content-type'] || 'audio/mpeg',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache'
+      const headersToForward = {};
+      const forwardHeaders = ['content-type', 'content-length', 'accept-ranges', 'icy-name', 'icy-genre'];
+      for (const h of forwardHeaders) {
+        if (proxyRes.headers[h] !== undefined) {
+          headersToForward[h] = proxyRes.headers[h];
+        }
+      }
+      if (!headersToForward['content-type']) {
+        headersToForward['content-type'] = 'audio/mpeg';
+      }
+      res.set(headersToForward);
+      pipeline(proxyRes, res, (err) => {
+        if (err) console.error('Pipeline error:', err.message);
       });
-      proxyRes.pipe(res);
     } else if ([301, 302, 303, 307, 308].indexOf(proxyRes.statusCode) !== -1) {
       const location = proxyRes.headers.location;
       if (location) {
@@ -75,17 +80,21 @@ app.get('/proxy/audio', (req, res) => {
           path: newUrl.pathname + newUrl.search,
           method: 'GET',
           headers: options.headers,
-          timeout: 10000
+          timeout: 15000
         };
         const newReq = newMod.request(newOptions, (newRes) => {
           console.log('Redirect status:', newRes.statusCode);
           if (newRes.statusCode === 200) {
-            res.set({
-              'Content-Type': newRes.headers['content-type'] || 'audio/mpeg',
-              'Accept-Ranges': 'bytes',
-              'Cache-Control': 'no-cache'
+            const h = {};
+            const fh = ['content-type', 'content-length', 'accept-ranges'];
+            for (const x of fh) {
+              if (newRes.headers[x] !== undefined) h[x] = newRes.headers[x];
+            }
+            if (!h['content-type']) h['content-type'] = 'audio/mpeg';
+            res.set(h);
+            pipeline(newRes, res, (err) => {
+              if (err) console.error('Redirect pipeline error:', err.message);
             });
-            newRes.pipe(res);
           } else {
             if (!res.headersSent) res.status(502).json({ error: 'Redirect target error', status: newRes.statusCode });
           }
@@ -118,10 +127,10 @@ app.get('/proxy/audio', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ service: 'Radio Proxy Server', version: 'v2.0', status: 'running' });
+  res.json({ service: 'Radio Proxy Server', version: 'v2.1', status: 'running' });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('Radio Proxy Server v2.0 running on port ' + PORT);
+  console.log('Radio Proxy Server v2.1 running on port ' + PORT);
 });
