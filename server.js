@@ -43,7 +43,7 @@ app.get('/proxy/audio', (req, res) => {
     path: path,
     method: 'GET',
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit/537.36',
       'Referer': urlObj.origin,
       'Accept': '*/*'
     }
@@ -58,17 +58,17 @@ app.get('/proxy/audio', (req, res) => {
         'Accept-Ranges': 'bytes'
       });
       proxyRes.pipe(res);
-    } else if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
+    } else if ([301, 302, 303, 307, 308].indexOf(proxyRes.statusCode) !== -1) {
       const location = proxyRes.headers.location;
       if (location) {
         console.log('Redirecting to:', location);
-        // 递归处理重定向（简化版）
         const newUrl = new URL(location, targetUrl);
         const newIsHttps = newUrl.protocol === 'https:';
         const newMod = newIsHttps ? https : http;
+        const newPort = newUrl.port || (newIsHttps ? 443 : 80);
         const newOptions = {
           hostname: newUrl.hostname,
-          port: newUrl.port || (newIsHttps ? 443 : 80),
+          port: newPort,
           path: newUrl.pathname + newUrl.search,
           method: 'GET',
           headers: options.headers
@@ -102,7 +102,8 @@ app.get('/proxy/audio', (req, res) => {
     if (!res.headersSent) res.status(502).json({ error: 'Proxy request failed', message: err.message });
   });
 
-  res.on('close', () => proxyReq.destroy());
+  res.on('close', () => { proxyReq.destroy(); });
+
   proxyReq.end();
 });
 
