@@ -8,6 +8,33 @@ const app = express();
 app.use(cors());
 
 // ============================================================
+// 范围 B：实时收听上报（转发期间周期性 upsert br-api 的 listening_active）
+// TELEMETRY_URL 未配置时安全跳过（不影响转发主流程）。
+// 长流靠 45s 定时器续活；HLS m3u8 轮询每次请求本就会命中并刷新 last_seen。
+// ============================================================
+const TELEMETRY_URL = process.env.BR_TELEMETRY_URL || 'https://breezeradio.com.cn/api/telemetry/active';      // 如 https://<br-api>/api/telemetry/active
+const TELEMETRY_KEY = process.env.BR_TELEMETRY_KEY || '';
+const TELEMETRY_INTERVAL_MS = 45000;
+
+function reportActiveListening(targetUrl, clientIp, res) {
+  if (!TELEMETRY_URL) return; // 未配置 → 安全 no-op
+  const payload = { source: 'proxy', url: targetUrl, client_ip: clientIp || '' };
+  const send = () => {
+    try {
+      fetch(TELEMETRY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Br-Telemetry-Key': TELEMETRY_KEY },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    } catch (e) { /* fetch 缺失/失败都静默降级，绝不影响音频转发 */ }
+  };
+  send(); // 首次
+  const timer = setInterval(send, TELEMETRY_INTERVAL_MS);
+  res.on('close', () => { try { clearInterval(timer); } catch (e) {} });
+  res.on('finish', send); // 流正常结束时刷一次，保留在 90s 窗口内
+}
+
+// ============================================================
 // HLS(m3u8) 播放列表重写
 // ============================================================
 // 分片常写相对路径（如 cctv2_audio/xxx.ts），经本代理拉取时相对路径会被解析到
@@ -124,6 +151,10 @@ app.get(['/proxy/audio', '/proxy/audio.m3u8'], (req, res) => {
   }
 
   console.log('Proxying:', targetUrl);
+
+  // 范围 B：实时收听上报（转发期间周期性续活，res 关闭时停止）
+  const clientIp = ((req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+  reportActiveListening(targetUrl, clientIp, res);
 
   const isHttps = urlObj.protocol === 'https:';
   const mod = isHttps ? https : http;
